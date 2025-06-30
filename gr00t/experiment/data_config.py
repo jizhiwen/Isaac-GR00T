@@ -882,7 +882,7 @@ class AgibotGenie1DataConfig:
 
 class RealManDataConfig(BaseDataConfig):
     # video_keys = ["video.ego_view"]
-    video_keys = ["video.front_view", "video.right_view"]
+    video_keys = ["video.front_view", "video.side_view","video.wrist_view"]
     state_keys = ["state.single_arm", "state.gripper"]
     action_keys = ["action.single_arm", "action.gripper"]
     language_keys = ["annotation.human.action.task_description"]
