@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import traceback
+import random
 
 import numpy as np
 import pandas as pd
@@ -889,7 +890,7 @@ def pad_parquet_data(source_path, target_path, original_dim=14, target_dim=18):
 
 
 def merge_datasets(
-    source_folders, output_folder, validate_ts=False, tolerance_s=1e-4, max_dim=18, default_fps=20
+    source_folders, output_folder, validate_ts=False, tolerance_s=1e-4, max_dim=18, default_fps=20, shuffle=True
 ):
     """
     将多个数据集文件夹合并为一个，处理索引、维度和元数据
@@ -976,6 +977,9 @@ def merge_datasets(
     # 使用更简单的方法计算视频总数 (Use simpler method to calculate total videos)
     total_videos = 0
 
+    # 用于收集所有episode信息
+    all_episodes_info = []  # 添加这一行
+
     for folder in source_folders:
         try:
             # 从每个数据集的info.json直接获取total_videos
@@ -1058,70 +1062,96 @@ def merge_datasets(
                 # 保存此文件夹中旧索引到新索引的映射
                 folder_task_mapping[folder][old_index] = task_desc_to_new_index[task_desc]
 
+                # 使用收集的唯一任务列表替换之前的任务处理逻辑
+                all_tasks = all_unique_tasks
+
             # Process all episodes from this folder
             for episode in episodes:
-                old_index = episode["episode_index"]
-                new_index = total_episodes
-
-                # Update episode index
-                episode["episode_index"] = new_index
-                all_episodes.append(episode)
-
-                # Update stats if available
-                if old_index in stats_map:
-                    stats = stats_map[old_index]
-                    stats["episode_index"] = new_index
-
-                    # Pad stats data if needed
-                    if "stats" in stats and folder_dimensions[folder] < max_dim:  # 使用变量替代硬编码的18
-                        # Pad observation.state and action stats
-                        for feature in ["observation.state", "action"]:
-                            if feature in stats["stats"]:
-                                for stat_type in ["mean", "std", "max", "min"]:
-                                    if stat_type in stats["stats"][feature]:
-                                        # Get current values
-                                        values = stats["stats"][feature][stat_type]
-
-                                        # Check if it's a list/array that needs padding
-                                        if (
-                                            isinstance(values, list) and len(values) < max_dim
-                                        ):  # 使用变量替代硬编码的18
-                                            # Pad with zeros
-                                            padded = values + [0.0] * (
-                                                max_dim - len(values)
-                                            )  # 使用变量替代硬编码的18
-                                            stats["stats"][feature][stat_type] = padded
-
-                    all_episodes_stats.append(stats)
-
-                    # Add to all_stats_data for proper merging
-                    if "stats" in stats:
-                        all_stats_data.append(stats["stats"])
-
-                # Add to mapping
-                episode_mapping.append((folder, old_index, new_index))
-
-                # Update counters
-                total_episodes += 1
-                total_frames += episode["length"]
-
-                # 处理每个episode时收集此信息
-                episode_to_frame_index[new_index] = cumulative_frame_count
-                cumulative_frame_count += episode["length"]
-
-            # 使用收集的唯一任务列表替换之前的任务处理逻辑
-            all_tasks = all_unique_tasks
+                all_episodes_info.append({
+                    "folder": folder,
+                    "episode": episode,
+                    "old_index": episode["episode_index"],
+                    "stat": stats_map.get(episode["episode_index"], None),
+                    "length": episode["length"]
+                })
 
         except Exception as e:
             print(f"Error processing folder {folder}: {e}")
             continue
 
+    if shuffle:
+        # 随机打乱episode顺序
+        random.shuffle(all_episodes_info)
+        print(f"随机打乱了 {len(all_episodes_info)} 个episode的顺序")
+
+    # 处理打乱后的episode
+    for episode_info in all_episodes_info:
+        folder = episode_info["folder"]
+        episode = episode_info["episode"]
+        old_index = episode_info["old_index"]
+        stat = episode_info["stat"]
+        length = episode_info["length"]
+
+        new_index = total_episodes
+
+        # 更新episode索引
+        episode["episode_index"] = new_index
+        all_episodes.append(episode)
+
+        # Update stats if available
+        if stat is not None:
+            stat["episode_index"] = new_index
+
+            # Pad stats data if needed
+            if "stats" in stat and folder_dimensions[folder] < max_dim:  # 使用变量替代硬编码的18
+                # Pad observation.state and action stats
+                for feature in ["observation.state", "action"]:
+                    if feature in stat["stats"]:
+                        for stat_type in ["mean", "std", "max", "min"]:
+                            if stat_type in stat["stats"][feature]:
+                                # Get current values
+                                values = stat["stats"][feature][stat_type]
+
+                                # Check if it's a list/array that needs padding
+                                if (
+                                    isinstance(values, list) and len(values) < max_dim
+                                ):  # 使用变量替代硬编码的18
+                                    # Pad with zeros
+                                    padded = values + [0.0] * (
+                                        max_dim - len(values)
+                                    )  # 使用变量替代硬编码的18
+                                    stat["stats"][feature][stat_type] = padded
+
+            all_episodes_stats.append(stat)
+
+            # Add to all_stats_data for proper merging
+            if "stats" in stat:
+                all_stats_data.append(stat["stats"])
+
+        # Add to mapping
+        episode_mapping.append((folder, old_index, new_index))
+
+        # Update counters
+        total_episodes += 1
+        total_frames += length
+
+        # 处理每个episode时收集此信息
+        episode_to_frame_index[new_index] = cumulative_frame_count
+        cumulative_frame_count += length
+
     print(f"Processed {total_episodes} episodes from {len(source_folders)} folders")
 
     # Save combined episodes and stats
     save_jsonl(all_episodes, os.path.join(output_folder, "meta", "episodes.jsonl"))
-    save_jsonl(all_episodes_stats, os.path.join(output_folder, "meta", "episodes_stats.jsonl"))
+    if len(all_episodes_stats) > 0:
+        save_jsonl(all_episodes_stats, os.path.join(output_folder, "meta", "episodes_stats.jsonl"))
     save_jsonl(all_tasks, os.path.join(output_folder, "meta", "tasks.jsonl"))
+
+    # Save modality for gr00t
+    modal_path = os.path.join(source_folders[0], "meta", "modality.json")
+    output_modal_path = os.path.join(output_folder, "meta", "modality.json")
+    if os.path.exists(modal_path):
+        shutil.copy2(modal_path, output_modal_path)
 
     # Merge and save stats
     stats_list = []
@@ -1301,9 +1331,10 @@ if __name__ == "__main__":
     parser.add_argument("--output", required=True, help="Output folder path")
     parser.add_argument("--max_dim", type=int, default=32, help="Maximum dimension (default: 32)")
     parser.add_argument("--fps", type=int, default=20, help="Your datasets FPS (default: 20)")
+    parser.add_argument("--shuffle", type=bool, default=True, help="Shuffle the datasets (defalut: True)")
 
     # Parse arguments
     args = parser.parse_args()
 
     # Use parsed arguments
-    merge_datasets(args.sources, args.output, max_dim=args.max_dim, default_fps=args.fps)
+    merge_datasets(args.sources, args.output, max_dim=args.max_dim, default_fps=args.fps, shuffle=args.shuffle)
